@@ -15,7 +15,6 @@ use axum::{
     routing::get,
     Router, ServiceExt,
 };
-use dotenv_codegen::dotenv;
 use futures::{SinkExt, StreamExt};
 use rand::random;
 use serde::{Deserialize, Serialize};
@@ -239,8 +238,7 @@ async fn main() {
     let app = middleware::from_fn_with_state(st, generate_new_channel).layer(app_ind);
 
     println!("Hello, world!");
-
-    let addr = SocketAddr::from(([0, 0, 0, 0], dotenv!("PORT").parse().unwrap_or(3000)));
+    let addr = SocketAddr::from(([0, 0, 0, 0], option_env!("PORT").and_then(|f| f.parse().ok()).unwrap_or(3000)));
     tracing::debug!("listening on {}", addr);
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
