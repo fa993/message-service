@@ -81,15 +81,14 @@ async fn handle_add(
     //extract into layer
     let (mut sender, mut receiver) = ws.split();
 
-    sender
+    let _ = sender
         .send(Message::Text(
             serde_json::to_string(&ChatMessage::System {
                 body: format!("Joined Channel {channel}"),
             })
             .unwrap(),
         ))
-        .await
-        .unwrap();
+        .await;
 
     let mut rx = state.read().await[&channel].broadcast.subscribe();
 
@@ -182,7 +181,9 @@ async fn generate_new_channel<B>(
 ) -> Response {
     if request.uri().path().split('/').nth(1).unwrap() == "new" {
         let mut k: u32 = random();
-        while state.read().await.contains_key(&k) {
+        while state.read().await.contains_key(&k)
+            && state.read().await[&k].usernames.lock().await.is_empty()
+        {
             k = random();
         }
         let r = request.uri_mut();
