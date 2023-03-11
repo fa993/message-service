@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    fmt::format,
     net::SocketAddr,
     sync::Arc,
 };
@@ -19,11 +18,7 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use rand::random;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{
-    broadcast,
-    mpsc::{self, error::SendError, UnboundedReceiver, UnboundedSender},
-    Mutex, RwLock,
-};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tower::{Layer, ServiceBuilder};
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 
@@ -86,7 +81,15 @@ async fn handle_add(
     //extract into layer
     let (mut sender, mut receiver) = ws.split();
 
-    sender.send(Message::Text(serde_json::to_string(&ChatMessage::System { body: format!("Joined Channel {}", channel) }).unwrap())).await.unwrap();
+    sender
+        .send(Message::Text(
+            serde_json::to_string(&ChatMessage::System {
+                body: format!("Joined Channel {channel}"),
+            })
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
 
     let mut rx = state.read().await[&channel].broadcast.subscribe();
 
@@ -165,7 +168,7 @@ async fn check_username_conflict<B>(
         .await
         .insert(name)
     {
-        return Err(StatusCode::IM_USED);
+        Err(StatusCode::IM_USED)
     } else {
         let response = next.run(request).await;
         Ok(response)
@@ -177,7 +180,7 @@ async fn generate_new_channel<B>(
     mut request: Request<B>,
     next: Next<B>,
 ) -> Response {
-    if request.uri().path().split("/").nth(1).unwrap() == "new" {
+    if request.uri().path().split('/').nth(1).unwrap() == "new" {
         let mut k: u32 = random();
         while state.read().await.contains_key(&k) {
             k = random();
@@ -194,7 +197,10 @@ async fn generate_new_channel<B>(
         } else {
             by
         };
-        *r = by.path_and_query(format!("/{}/{}", k, r.path().split("/").last().unwrap())).build().unwrap();
+        *r = by
+            .path_and_query(format!("/{}/{}", k, r.path().split('/').last().unwrap()))
+            .build()
+            .unwrap();
     }
     let response = next.run(request).await;
     response
