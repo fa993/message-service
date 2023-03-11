@@ -1,7 +1,7 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     net::SocketAddr,
-    sync::Arc,
+    sync::{atomic::AtomicBool, Arc},
 };
 
 use axum::{
@@ -15,10 +15,11 @@ use axum::{
     routing::get,
     Router, ServiceExt,
 };
+use crossbeam_skiplist::SkipMap;
 use futures::{SinkExt, StreamExt};
 use rand::random;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tower::{Layer, ServiceBuilder};
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 
@@ -53,6 +54,11 @@ struct ChatState {
     // usernames: (UnboundedSender<String>, UnboundedReceiver<bool>),
     usernames: Mutex<HashSet<String>>,
     broadcast: broadcast::Sender<ChatMessage>,
+    available: AtomicBool,
+}
+
+struct Chats {
+    chats: SkipMap<u32, ChatState>,
 }
 
 impl ChatState {
@@ -60,6 +66,7 @@ impl ChatState {
         Self {
             broadcast: broadcast::channel(100_000).0,
             usernames: Default::default(),
+            available: AtomicBool::new(false),
         }
     }
 }
@@ -67,17 +74,12 @@ impl ChatState {
 async fn chat_room_adder(
     ws: WebSocketUpgrade,
     Path((channel, name)): Path<(u32, String)>,
-    State(state): State<Arc<RwLock<HashMap<u32, ChatState>>>>,
+    State(state): State<Arc<Chats>>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_add(socket, channel, name, state))
 }
 
-async fn handle_add(
-    ws: WebSocket,
-    channel: u32,
-    name: String,
-    state: Arc<RwLock<HashMap<u32, ChatState>>>,
-) {
+async fn handle_add(ws: WebSocket, channel: u32, name: String, state: Arc<Chats>) {
     //extract into layer
     let (mut sender, mut receiver) = ws.split();
 
@@ -90,13 +92,26 @@ async fn handle_add(
         ))
         .await;
 
-    let mut rx = state.read().await[&channel].broadcast.subscribe();
+    let mut rx = state
+        .chats
+        .get(&channel)
+        .unwrap()
+        .value()
+        .broadcast
+        .subscribe();
 
     let msg = ChatMessage::System {
         body: format!("User {name} joined"),
     };
 
-    state.read().await[&channel].broadcast.send(msg).unwrap();
+    state
+        .chats
+        .get(&channel)
+        .unwrap()
+        .value()
+        .broadcast
+        .send(msg)
+        .unwrap();
 
     let mut send_task = tokio::spawn(async move {
         while let Ok(msg) = rx.recv().await {
@@ -111,7 +126,7 @@ async fn handle_add(
         }
     });
 
-    let tx = state.read().await[&channel].broadcast.clone();
+    let tx = state.chats.get(&channel).unwrap().value().broadcast.clone();
     let usname = name.clone();
 
     let mut recv_task = tokio::spawn(async move {
@@ -133,56 +148,68 @@ async fn handle_add(
         body: format!("User {name} left"),
     };
 
-    state.read().await[&channel].broadcast.send(msg).unwrap();
+    state
+        .chats
+        .get(&channel)
+        .unwrap()
+        .value()
+        .broadcast
+        .send(msg)
+        .unwrap();
 
-    state.read().await[&channel]
-        .usernames
-        .lock()
-        .await
-        .remove(name.as_str());
+    let u = state.chats.get(&channel).unwrap();
+    let mut gua = u.value().usernames.lock().await;
+
+    gua.remove(name.as_str());
+
+    if gua.is_empty() {
+        u.value()
+            .available
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 async fn add_channel_layer<B>(
     Path((channel, _)): Path<(u32, String)>,
-    State(state): State<Arc<RwLock<HashMap<u32, ChatState>>>>,
+    State(state): State<Arc<Chats>>,
     request: Request<B>,
     next: Next<B>,
 ) -> Response {
-    if !state.read().await.contains_key(&channel) {
-        state.write().await.insert(channel, ChatState::new());
-    }
+    state.chats.get_or_insert(channel, ChatState::new());
     let response = next.run(request).await;
     response
 }
 
 async fn check_username_conflict<B>(
     Path((channel, name)): Path<(u32, String)>,
-    State(state): State<Arc<RwLock<HashMap<u32, ChatState>>>>,
+    State(state): State<Arc<Chats>>,
     request: Request<B>,
     next: Next<B>,
 ) -> Result<Response, StatusCode> {
-    if !state.read().await[&channel]
-        .usernames
-        .lock()
-        .await
-        .insert(name)
-    {
-        Err(StatusCode::IM_USED)
-    } else {
-        let response = next.run(request).await;
-        Ok(response)
+    if let Some(t) = state.chats.get(&channel) {
+        if !t.value().usernames.lock().await.insert(name) {
+            return Err(StatusCode::IM_USED);
+        }
     }
+    let response = next.run(request).await;
+    Ok(response)
 }
 
 async fn generate_new_channel<B>(
-    State(state): State<Arc<RwLock<HashMap<u32, ChatState>>>>,
+    State(state): State<Arc<Chats>>,
     mut request: Request<B>,
     next: Next<B>,
 ) -> Response {
     if request.uri().path().split('/').nth(1).unwrap() == "new" {
         let mut k: u32 = random();
-        while state.read().await.contains_key(&k)
-            && state.read().await[&k].usernames.lock().await.is_empty()
+        while state.chats.contains_key(&k)
+            && state
+                .chats
+                .get(&k)
+                .unwrap()
+                .value()
+                .available
+                .load(std::sync::atomic::Ordering::SeqCst)
         {
             k = random();
         }
@@ -217,7 +244,9 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let st = Arc::new(RwLock::new(HashMap::new()));
+    let st = Arc::new(Chats {
+        chats: SkipMap::new(),
+    });
 
     let app_ind = Router::new()
         .route("/new/:name", get(chat_room_adder))
@@ -237,8 +266,12 @@ async fn main() {
 
     let app = middleware::from_fn_with_state(st, generate_new_channel).layer(app_ind);
 
-    println!("Hello, world!");
-    let addr = SocketAddr::from(([0, 0, 0, 0], option_env!("PORT").and_then(|f| f.parse().ok()).unwrap_or(3000)));
+    let addr = SocketAddr::from((
+        [0, 0, 0, 0],
+        option_env!("PORT")
+            .and_then(|f| f.parse().ok())
+            .unwrap_or(3000),
+    ));
     tracing::debug!("listening on {}", addr);
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
