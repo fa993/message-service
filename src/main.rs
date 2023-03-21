@@ -1,34 +1,11 @@
-use std::{
-    collections::HashSet,
-    net::SocketAddr,
-    sync::{atomic::AtomicBool, Arc},
-};
+use std::{net::SocketAddr, sync::Arc};
 
-use axum::{
-    extract::{
-        ws::{Message, WebSocket},
-        Path, State, WebSocketUpgrade,
-    },
-    headers::authorization::{Authorization, Bearer},
-    http::{Request, StatusCode, Uri},
-    middleware::{self, Next},
-    response::{IntoResponse, Response},
-    routing::{get, post},
-    Router, ServiceExt, TypedHeader,
-};
+use axum::routing::get;
+use axum::Router;
 
-use axum_extra::extract::cookie::{Cookie, CookieJar};
-
-use crossbeam_skiplist::SkipMap;
-use futures::{SinkExt, StreamExt};
-use rand::random;
-use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, Mutex};
-use tower::{Layer, ServiceBuilder};
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
-use uuid::Uuid;
 
-use crate::unmanaged::{chat_room_adder, UnmanagedChats};
+use crate::unmanaged::UnmanagedChats;
 
 // enum WriterMessage<T: Send + Sync> {
 //     InsertIfNotExists(T),
@@ -71,35 +48,22 @@ use crate::unmanaged::{chat_room_adder, UnmanagedChats};
 mod unmanaged {
 
     use std::{
-        collections::{HashMap, HashSet},
-        net::SocketAddr,
-        sync::{atomic::AtomicBool, Arc},
+        collections::HashMap,
+        sync::Arc,
     };
 
     use axum::{
         extract::{
             ws::{Message, WebSocket},
-            Path, State, WebSocketUpgrade,
+            State, WebSocketUpgrade,
         },
-        headers::authorization::{Authorization, Bearer},
-        http::{Request, StatusCode, Uri},
-        middleware::{self, Next},
-        response::{IntoResponse, Response},
-        routing::{get, post},
-        Router, ServiceExt, TypedHeader,
+        response::IntoResponse,
     };
-
-    use axum_extra::extract::cookie::{Cookie, CookieJar};
 
     use crossbeam_skiplist::SkipMap;
     use futures::{SinkExt, StreamExt};
-    use rand::random;
     use serde::{Deserialize, Serialize};
-    use tokio::sync::{broadcast, mpsc, Mutex};
-    use tower::{Layer, ServiceBuilder};
-    use tracing_subscriber::{
-        prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt,
-    };
+    use tokio::sync::{broadcast, mpsc};
     use uuid::Uuid;
 
     #[derive(Default)]
@@ -195,8 +159,17 @@ mod unmanaged {
     }
 
     pub fn gen_example_text() {
-        println!("{:?}", serde_json::to_string(&UnmanagedChatUserMessage::Subscribe(Uuid::nil())));
-        println!("{:?}", serde_json::to_string(&UnmanagedChatUserMessage::Publish {body: "Hey!".to_string(), channel: Uuid::nil()}));
+        println!(
+            "{:?}",
+            serde_json::to_string(&UnmanagedChatUserMessage::Subscribe(Uuid::nil()))
+        );
+        println!(
+            "{:?}",
+            serde_json::to_string(&UnmanagedChatUserMessage::Publish {
+                body: "Hey!".to_string(),
+                channel: Uuid::nil()
+            })
+        );
     }
 }
 
@@ -285,7 +258,7 @@ async fn main() {
     let st = Arc::new(UnmanagedChats::default());
 
     let app = Router::new()
-        .route("/unmanaged/", get(chat_room_adder))
+        .route("/unmanaged/", get(unmanaged::chat_room_adder))
         // .route("/newchannel", post(chat_room_creator))
         // .route("/:channel/:name", get(chat_room_adder))
         // .layer(
@@ -303,7 +276,7 @@ async fn main() {
 
     // let app = middleware::from_fn_with_state(st, generate_new_channel).layer(app_ind);
 
-            unmanaged::gen_example_text();
+    unmanaged::gen_example_text();
 
     let addr = SocketAddr::from((
         [0, 0, 0, 0],
