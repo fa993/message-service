@@ -1,3 +1,5 @@
+pub mod dist;
+
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::routing::get;
@@ -5,7 +7,7 @@ use axum::Router;
 
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 
-use crate::unmanaged::UnmanagedChats;
+use crate::{dist::make_dist, unmanaged::UnmanagedChats};
 
 // enum WriterMessage<T: Send + Sync> {
 //     InsertIfNotExists(T),
@@ -47,10 +49,7 @@ use crate::unmanaged::UnmanagedChats;
 
 mod unmanaged {
 
-    use std::{
-        collections::HashMap,
-        sync::Arc,
-    };
+    use std::{collections::HashMap, sync::Arc};
 
     use axum::{
         extract::{
@@ -111,7 +110,7 @@ mod unmanaged {
                     UnmanagedChatUserMessage::Subscribe(t) => {
                         let mut rx = state
                             .chats
-                            .get_or_insert(t, broadcast::channel(100_000).0)
+                            .get_or_insert(t, broadcast::channel(100).0)
                             .value()
                             .subscribe();
 
@@ -247,6 +246,8 @@ mod unmanaged {
 
 #[tokio::main]
 async fn main() {
+    make_dist().await;
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
