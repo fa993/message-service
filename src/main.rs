@@ -62,12 +62,44 @@ mod unmanaged {
     use crossbeam_skiplist::SkipMap;
     use futures::{SinkExt, StreamExt};
     use serde::{Deserialize, Serialize};
-    use tokio::sync::{broadcast, mpsc};
+    use tokio::sync::{
+        broadcast::{self, error::SendError, Sender},
+        mpsc,
+    };
     use uuid::Uuid;
 
-    #[derive(Default)]
+    #[derive(Debug)]
+    pub enum RouteError {
+        ChannelNotFound,
+        BadMessageFormat,
+        SendErr(SendError<String>),
+    }
+
     pub struct UnmanagedChats {
         chats: SkipMap<Uuid, broadcast::Sender<String>>,
+        global_send: Sender<String>,
+    }
+
+    impl UnmanagedChats {
+        pub fn new(se: Sender<String>) -> UnmanagedChats {
+            UnmanagedChats {
+                chats: SkipMap::default(),
+                global_send: se,
+            }
+        }
+
+        pub fn route_message(&self, msg: String) -> Result<(), RouteError> {
+            let umc: UnmanagedChatUserMessage =
+                serde_json::from_str(&msg).map_err(|_| RouteError::BadMessageFormat)?;
+            if let Some(f) = self.chats.get(umc.to()) {
+                f.value()
+                    .send(msg)
+                    .map(|_| ())
+                    .map_err(|f| RouteError::SendErr(f))
+            } else {
+                Err(RouteError::ChannelNotFound)
+            }
+        }
     }
 
     #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -75,6 +107,16 @@ mod unmanaged {
         Publish { channel: Uuid, body: String },
         Subscribe(Uuid),
         Unsubscribe(Uuid),
+    }
+
+    impl UnmanagedChatUserMessage {
+        pub fn to(&self) -> &Uuid {
+            match &self {
+                UnmanagedChatUserMessage::Publish { channel, .. } => channel,
+                UnmanagedChatUserMessage::Subscribe(t)
+                | UnmanagedChatUserMessage::Unsubscribe(t) => t,
+            }
+        }
     }
 
     pub async fn chat_room_adder(
@@ -103,17 +145,17 @@ mod unmanaged {
 
             while let Some(Ok(Message::Text(text))) = receiver.next().await {
                 // Add username before message.
+                println!("{:?}", state.global_send.send(text.clone()));
 
                 let uc: UnmanagedChatUserMessage = serde_json::from_str(&text).unwrap();
 
                 match uc {
                     UnmanagedChatUserMessage::Subscribe(t) => {
-                        let mut rx = state
+                        let rx_tx = state
                             .chats
-                            .get_or_insert(t, broadcast::channel(100).0)
-                            .value()
-                            .subscribe();
+                            .get_or_insert(t, broadcast::channel(100).0);
 
+                        let mut rx = rx_tx.value().subscribe();
                         let mytxmpc = txmpc.clone();
                         let send_task = tokio::spawn(async move {
                             while let Ok(msg) = rx.recv().await {
@@ -128,6 +170,10 @@ mod unmanaged {
                         });
 
                         map.insert(t, send_task);
+
+                        if rx_tx.value().send(text).is_err() {
+                            break;
+                        }
                     }
                     UnmanagedChatUserMessage::Unsubscribe(t) => {
                         // state.chats
@@ -138,11 +184,14 @@ mod unmanaged {
                             if f.value().receiver_count() == 0 {
                                 map.remove(&t);
                             }
+                            if f.value().send(text).is_err() {
+                                break;
+                            }
                         }
                     }
-                    UnmanagedChatUserMessage::Publish { channel, body } => {
+                    UnmanagedChatUserMessage::Publish { channel, .. } => {
                         if let Some(t) = state.chats.get(&channel) {
-                            if t.value().send(body).is_err() {
+                            if t.value().send(text).is_err() {
                                 break;
                             }
                         }
@@ -246,17 +295,28 @@ mod unmanaged {
 
 #[tokio::main]
 async fn main() {
-    make_dist().await;
+    let _ = dotenv::dotenv();
 
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "example_chat=debug".into()),
+                .unwrap_or_else(|_| "message_service=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let st = Arc::new(UnmanagedChats::default());
+    let (se, mut rx) = make_dist().await;
+
+    let st = Arc::new(UnmanagedChats::new(se));
+    let st_2 = st.clone();
+
+    tokio::spawn(async move {
+        while let Some(x) = rx.recv().await {
+            let r = st_2.route_message(x);
+            println!("{:?}", r);
+        }
+        println!("You're dead");
+    });
 
     let app = Router::new()
         .route("/unmanaged/", get(unmanaged::chat_room_adder))
